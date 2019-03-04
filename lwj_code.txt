@@ -1,0 +1,285 @@
+from __future__ import division, print_function
+from PIL import Image
+from matplotlib import pyplot as plt
+import numpy as np
+import math
+
+
+def parser_bmp(file):
+    with open(file,'rb') as f:
+        while True:
+            a=f.read(1)
+            if not a:
+                break
+            print(("{}".format(hex(ord(a)))+''))
+    return
+
+def gray_change(file, level):
+    img = np.array(Image.open(file))
+    fm = img-np.min(img)
+    new_img= (2**(level)-1)*(fm/np.max(fm)) 
+    new_img = new_img.astype(np.uint8)
+    return new_img
+
+def mean_and_var(file):
+    img = np.array(Image.open(file))
+    intensity_total = 0
+    for i in range(img.shape[0]):
+        for j in range(img.shape[1]):
+            intensity_total += img[i][j]
+    mean = intensity_total / (img.shape[0]*img.shape[1])
+
+    var_total = 0
+    for i in range(img.shape[0]):
+        for j in range(img.shape[1]):
+            var_total += (img[i][j] - mean)**2
+    variation = var_total / (img.shape[0]*img.shape[1])
+
+    return mean, variation
+
+def nn_interpolation(file, size):
+    img = np.array(Image.open(file))
+    origin_size = img.shape[0]
+    new_size = size
+    scale = new_size / origin_size
+    near_img = np.zeros((new_size,new_size), dtype=np.uint8)
+    for i in range(near_img.shape[0]):
+        correspond_origin_i = int((i + 1) / scale + 0.5) - 1
+        for j in range(near_img.shape[1]):
+            correspond_origin_j = int((j + 1) / scale + 0.5) - 1
+            near_img[i][j] = img[correspond_origin_i][correspond_origin_j]
+    return near_img
+
+def bilinear_interpolation(file, size):
+    img = np.array(Image.open(file))
+    origin_size = img.shape[0]
+    new_size = size
+    scale = new_size / origin_size
+    bilinear_img = np.zeros((new_size, new_size), dtype=np.uint8)
+    def get_coeff(index, origin_index):
+        a = index[1] / scale - origin_index[1]
+        b = index[0] / scale - origin_index[0]
+        assert a > 0
+        assert b > 0
+        leftup = (1-a)*(1-b)
+        rightup = a*(1-b)
+        leftdown = (1-a)*b
+        rightdown = a*b
+        return (leftup, rightup, leftdown, rightdown)
+
+
+    for i in range(bilinear_img.shape[0]):
+        origin_i = int((i + 1) / scale + 0.5) - 1
+        for j in range(bilinear_img.shape[1]):
+            origin_j = int((j + 1) / scale + 0.5) - 1
+            coeff = get_coeff((i,j), (origin_i, origin_j))
+            if origin_i + 1 < origin_size and origin_j + 1 < origin_size:
+                bilinear_img[i][j] = coeff[0]*img[origin_i][origin_j] + coeff[1]*img[origin_i][origin_j+1] + coeff[2]*img[origin_i+1][origin_j] + coeff[3]*img[origin_i+1][origin_j+1]
+    return bilinear_img
+
+def bicub_interpolation(file, size):
+    img = np.array(Image.open(file))
+    origin_size = img.shape[0]
+    new_size = size
+    scale = new_size / origin_size
+    cub_img = np.zeros((new_size, new_size), dtype=np.uint8)
+
+    def firstOrderGradient(img, wrt=None):
+        if not wrt:
+            raise NameError
+        fogd = np.zeros_like(img, dtype=np.uint8)
+        if wrt == 'x':
+            for row in range(img.shape[0] - 1):
+                fogd[row, :] = img[row+1, :] - img[row, :]
+        if wrt == 'y':
+            for col in range(img.shape[1] - 1):
+                fogd[:, col] = img[:, col+1] - img[:, col]
+        return fogd
+
+    def secondOrderGradient(fogd, wrt=None):
+        if not wrt:
+            raise NameError
+        sogd = np.zeros_like(fogd, dtype=np.uint8)
+        if wrt == 'y':
+            for row in range(fogd.shape[0] - 1):
+                sogd[row, :] = fogd[row+1, :] - fogd[row, :]
+        if wrt == 'x':
+            for col in range(fogd.shape[1] - 1):
+                sogd[:, col] = fogd[:, col+1] - fogd[:, col]
+        return sogd
+
+    def getF(img,fogdx,fogdy,sogd, index):
+        i,j = index
+        F = np.zeros((4,4), dtype=np.float)
+        if i+1 < img.shape[0] and j+1 < img.shape[1]:
+    #         F[0, :] = [img[i,j], img[i,j+1], fogdy[i,j], fogdy[i+1,j]]
+            F[0, :] = [img[i,j], img[i+1, j], fogdy[i,j], fogdy[i, j+1]]
+    #         F[1, :] = [img[i,j+1], img[i+1,j+1], fogdy[i, j+1], fogdy[i+1, j+1]]
+            F[1, :] = [img[i+1,j], img[i+1,j+1], fogdy[i+1, j], fogdy[i+1, j+1]]
+    #         F[2, :] = [fogdx[i,j], fogdx[i+1,j], sogd[i,j], sogd[i+1,j]]
+            F[2, :] = [fogdx[i,j], fogdx[i,j+1], sogd[i,j], sogd[i,j+1]]
+    #         F[3, :] = [fogdx[i, j+1], fogdx[i+1, j+1], sogd[i, j+1], sogd[i+1, j+1]]
+            F[3, :] = [fogdx[i+1, j], fogdx[i+1, j+1], sogd[i+1, j], sogd[i+1, j+1]]
+        return F
+
+    fogdx = firstOrderGradient(img, wrt='x')
+    fogdy = firstOrderGradient(img, wrt='y')
+
+    # sogdxx = secondOrderGradient(fogdx, wrt='x')
+    # sogdyy = secondOrderGradient(fogdy, wrt='y')
+    sogd = secondOrderGradient(fogdx, wrt='y')
+
+
+    A = np.array([[1,0,0,0],[0,0,1,0],[-3,3,-2,-1],[2,-2,1,1]]).astype(np.float)
+    B = np.array([[1,0,-3,2],[0,0,3,-2],[0,1,-2,1],[0,0,-1,1]]).astype(np.float)
+
+
+    for i in range(1, cub_img.shape[0]-1):
+        oi = int((i+1) / scale + 0.5) - 1
+        x = i / scale - oi
+        for j in range(1, cub_img.shape[1]-1):
+            oj = int((j+1) / scale + 0.5) - 1
+            y = j / scale - oj
+            F = getF(img, fogdx, fogdy, sogd, (oi,oj))
+            coeff = np.matmul(A,F)
+            coeff = np.matmul(coeff,B)
+            temp = np.matmul(np.array([[1, x, x**2, x**3]]), coeff)
+            temp = np.matmul(temp, np.array([[1],[y],[y**2],[y**3]]))
+            cub_img[i,j] = np.clip(temp,0,255)
+
+    cub_img = cub_img.astype(np.uint8)
+
+    return cub_img
+
+
+def sheer(file, factor):
+    img = np.array(Image.open(file))
+    sres = np.zeros((512,1250)).astype(np.uint8)
+    shear_matrix = np.array([[1.,1.5],[0.,1.]])
+    for i in range(512):
+        for j in range(512):
+            coord = np.matmul(np.array([i,j]), shear_matrix)
+            x = int(coord[0])
+            y = int(coord[1])
+            if y > 1249 or x > 511:
+                continue
+            sres[x, y] = img[i,j]
+    return sres
+
+def rotate(file, theta):
+    img = Image.open(file)
+    # rotate_matrix2 = np.array([[math.cos(theta),math.sin(theta),0],[-math.sin(theta), math.cos(theta), 0], [0,0,1]])
+    # rres = img.rotate(30)
+    rres = np.zeros((512,512)).astype(np.uint8)
+    rotate_matrix = np.array([[math.cos(theta),math.sin(theta)],[-math.sin(theta),math.cos(theta)]])
+    img = np.array(img)
+    size = img.shape[0]
+    for i in range(512):
+        for j in range(512):
+            coord = np.matmul(np.array([i,j]), rotate_matrix)
+            coord[0] += (-0.5*size*math.cos(theta) + 0.5*size*math.sin(theta) + 0.5*size)
+            coord[1] += (-0.5*size*math.sin(theta) - 0.5*size*math.cos(theta) + 0.5*size)
+            x = int(coord[0])
+            y = int(coord[1])
+            if y > 511 or x > 511 or x < 0 or y < 0:
+                continue
+            rres[x, y] = img[i,j]
+    return rres
+
+if __name__ == '__main__':
+    #FIRST QUESTION
+    parser_bmp('7.bmp')
+
+    #SECOND
+    fig = plt.figure()
+    for l in range(1,9):
+        x = '24'+str(l)
+        plt.subplot(eval(x))
+        plt.imshow(gray_change('lena.bmp', l), cmap='gray')
+        plt.title('{}'.format(l))
+        plt.axis('off')
+    plt.show()
+
+    #THIRD
+    m, v = mean_and_var('lena.bmp')
+    print(m,v)
+
+    #FORTH
+    near_img = nn_interpolation('lena.bmp', 2048)
+    fig = plt.figure()
+    plt.imshow(near_img, cmap='gray')
+    plt.show()
+
+    bilinear_img = bilinear_interpolation('lena.bmp', 2048)
+    fig = plt.figure()
+    plt.imshow(bilinear_img, cmap='gray')
+    plt.show()
+    # bi = Image.fromarray(bilinear_img)
+    # bi.save('./bilinear_img.bmp')
+
+    bicub_img = bicub_interpolation('lena.bmp', 2048)
+    fig = plt.figure()
+    plt.imshow(bicub_img, cmap='gray')
+    # plt.show()
+
+    #!!!!the above result is extremely awful but I do not know why, so use method off the shelf to get presentation!!!!
+    img_lena = Image.open('./lena.bmp')
+    cub_img = img_lena.resize((2048,2048), Image.BICUBIC)
+    plt.imshow(cub_img, cmap='gray')
+    plt.show()
+    # cub_img.save('./cub_img.bmp')
+
+
+    #FIFTH
+    sres = sheer('lena.bmp', 1.5)
+    sres = Image.fromarray(sres)
+    fig = plt.figure()
+    plt.imshow(sres.resize((2048,2048), Image.NEAREST), cmap='gray')
+    plt.title('nn')
+    plt.show()
+    plt.imshow(sres.resize((2048,2048), Image.BILINEAR), cmap='gray')
+    plt.title('bilinear')
+    plt.show()
+    plt.imshow(sres.resize((2048,2048), Image.BICUBIC), cmap='gray')
+    plt.title('bicub')
+    plt.show()
+
+    sres = sheer('elain1.bmp', 1.5)
+    sres = Image.fromarray(sres)
+    fig = plt.figure()
+    plt.imshow(sres.resize((2048,2048), Image.NEAREST), cmap='gray')
+    plt.title('nn')
+    plt.show()
+    plt.imshow(sres.resize((2048,2048), Image.BILINEAR), cmap='gray')
+    plt.title('bilinear')
+    plt.show()
+    plt.imshow(sres.resize((2048,2048), Image.BICUBIC), cmap='gray')
+    plt.title('bicub')
+    plt.show()
+
+    rres = rotate('lena.bmp', math.pi/6)
+    rres = Image.fromarray(rres)
+    fig = plt.figure()
+    plt.imshow(rres.resize((2048,2048), Image.NEAREST), cmap='gray')
+    plt.title('nn')
+    plt.show()
+    plt.imshow(rres.resize((2048,2048), Image.BILINEAR), cmap='gray')
+    plt.title('bilinear')
+    plt.show()
+    plt.imshow(rres.resize((2048,2048), Image.BICUBIC), cmap='gray')
+    plt.title('bicub')
+    plt.show()
+
+    rres = rotate('elain1.bmp', math.pi/6)
+    rres = Image.fromarray(rres)
+    fig = plt.figure()
+    plt.imshow(rres.resize((2048,2048), Image.NEAREST), cmap='gray')
+    plt.title('nn')
+    plt.show()
+    plt.imshow(rres.resize((2048,2048), Image.BILINEAR), cmap='gray')
+    plt.title('bilinear')
+    plt.show()
+    plt.imshow(rres.resize((2048,2048), Image.BICUBIC), cmap='gray')
+    plt.title('bicub')
+    plt.show()
+
